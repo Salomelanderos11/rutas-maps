@@ -1,114 +1,275 @@
 #%%
 import requests
-import folium
-from folium.plugins import MousePosition
-from branca.element import Element
 import math
-from collections import deque
-from folium.plugins import MarkerCluster
-from branca.element import JavascriptLink
 from ipyleaflet import Map, Marker, FullScreenControl, LayerGroup, Polyline
 import ipywidgets as widgets
 from IPython.display import display
 
-# 1. Crear el mapa centrado en tu sector de Culiacán
+sur = 24.796998
+oeste = -107.401461
+norte = 24.812974
+este = -107.387524
+
+def extraer_nodos_sector(south, west, north, east):
+    url = "https://overpass-api.de/api/interpreter"
+    query = f"""
+    [out:json][timeout:60];
+    (way["highway"~"primary|secondary|tertiary|residential"]({south},{west},{north},{east}););
+    out body; >; out skel qt;
+    """
+    r = requests.post(url, data={'data': query})
+    if r.status_code == 200:
+        return r.json().get('elements', [])
+    return []
+
+data = extraer_nodos_sector(sur, oeste, norte, este)
+nodos_coords = {e['id']: (e['lat'], e['lon']) for e in data if e['type'] == 'node'}
+
+def calcular_distancia(p1, p2):
+    lat1, lon1 = p1
+    lat2, lon2 = p2
+    radio_tierra = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = math.sin(delta_phi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return radio_tierra * c
+
+def obtener_id_mas_cercano(lat_clic, lon_clic, nodos_dict):
+    distancia_minima = float('inf')
+    id_mas_cercano = None
+    for nodo_id, coords in nodos_dict.items():
+        dist = calcular_distancia((lat_clic, lon_clic), coords)
+        if dist < distancia_minima:
+            distancia_minima = dist
+            id_mas_cercano = nodo_id
+    return id_mas_cercano, distancia_minima
+
+def construir_grafo(data):
+    grafo = {}
+    nodos_c = {e['id']: (e['lat'], e['lon']) for e in data if e['type'] == 'node'}
+    for ele in data:
+        if ele['type'] == 'way':
+            nodos_en_calle = ele.get('nodes', [])
+            for i in range(len(nodos_en_calle) - 1):
+                u = nodos_en_calle[i]
+                v = nodos_en_calle[i+1]
+                if u in nodos_c and v in nodos_c:
+                    dist = calcular_distancia(nodos_c[u], nodos_c[v])
+                    if u not in grafo:
+                        grafo[u] = {'lat': nodos_c[u][0], 'lon': nodos_c[u][1], 'vecinos': []}
+                    if v not in grafo:
+                        grafo[v] = {'lat': nodos_c[v][0], 'lon': nodos_c[v][1], 'vecinos': []}
+                    grafo[u]['vecinos'].append({'id': v, 'peso': dist})
+                    grafo[v]['vecinos'].append({'id': u, 'peso': dist})
+    return grafo
+
+grafocompleto = construir_grafo(data)
+
+
+def buscar_ruta_bfs(grafo, inicio_id, meta_id):
+  
+    # 1. Cola para BFS: guarda el (nodo_actual, camino_recorrido)
+    cola = deque([(inicio_id, [inicio_id])])
+    
+    # 2. Conjunto de visitados para evitar ciclos infinitos
+    visitados = {inicio_id}
+
+    while cola:
+        (nodo_actual, camino) = cola.popleft()
+
+        # ¿Llegamos a la meta?
+        if nodo_actual == meta_id:
+            print("bfs exito")
+            return camino
+
+        # Explorar vecinos
+        # VALIDACIÓN 3: Verificar que el nodo actual tenga la llave 'vecinos'
+        if 'vecinos' in grafo[nodo_actual]:
+            for vecino_info in grafo[nodo_actual]['vecinos']:
+                vecino_id = vecino_info['id']
+                
+                # VALIDACIÓN 4: Solo procesar el vecino si existe en el grafo
+                # Esto evita el KeyError si el vecino está fuera del sector (Bounding Box)
+                if vecino_id in grafo and vecino_id not in visitados:
+                    visitados.add(vecino_id)
+                    
+                    # Creamos el nuevo camino (forma eficiente de copiar lista)
+                    nuevo_camino = camino + [vecino_id]
+                    cola.append((vecino_id, nuevo_camino))
+
+    print("No se encontró una ruta entre los nodos seleccionados.")
+    return None
+
+
+
+def buscar_ruta_dfs(grafo, inicio_id, meta_id):
+  
+    # 1. pila para BFS: guarda el (nodo_actual, camino_recorrido)
+    stack = [(inicio_id, [inicio_id], 0)]
+    
+    # 2. Conjunto de visitados para evitar ciclos infinitos
+    visitados = {inicio_id}
+
+    while stack:
+        (nodo_actual, camino, profundidad) = stack.pop()
+
+        # ¿Llegamos a la meta?
+        if nodo_actual == meta_id:
+            print("dfs exito")
+            return camino
+
+        # Explorar vecinos
+        # VALIDACIÓN 3: Verificar que el nodo actual tenga la llave 'vecinos'
+        if 'vecinos' in grafo[nodo_actual]:
+            for vecino_info in grafo[nodo_actual]['vecinos']:
+                vecino_id = vecino_info['id']
+                
+                # VALIDACIÓN 4: Solo procesar el vecino si existe en el grafo
+                # Esto evita el KeyError si el vecino está fuera del sector (Bounding Box)
+                if vecino_id in grafo and vecino_id not in visitados:
+                    visitados.add(vecino_id)
+                    
+                    # Creamos el nuevo camino (forma eficiente de copiar lista)
+                    nuevo_camino = camino + [vecino_id]
+                    nueva_profundidad = profundidad + 1
+                    stack.append((vecino_id, nuevo_camino, nueva_profundidad))
+
+    print("No se encontró una ruta entre los nodos seleccionados.")
+    return None
+
+
+
+
+
+
+def buscar_ruta_ldfs(grafo, inicio_id, meta_id, limite_profundidad=50):
+    
+    # 1. Pila: guarda (nodo_actual, camino_recorrido, profundidad_actual)
+    stack = [(inicio_id, [inicio_id], 0)]
+    
+    # 2. Conjunto de visitados para evitar ciclos
+    visitados = {inicio_id}
+
+    while stack:
+        (nodo_actual, camino, profundidad) = stack.pop()
+
+        # ¿Llegamos a la meta?
+        if nodo_actual == meta_id:
+            print(f"✅ LDFS éxito — profundidad: {profundidad}")
+            return camino
+
+        # 🔑 DIFERENCIA CLAVE: si ya alcanzamos el límite, no expandir este nodo
+        if profundidad >= limite_profundidad:
+            continue
+
+        # Explorar vecinos
+        if 'vecinos' in grafo[nodo_actual]:
+            for vecino_info in grafo[nodo_actual]['vecinos']:
+                vecino_id = vecino_info['id']
+                
+                if vecino_id in grafo and vecino_id not in visitados:
+                    visitados.add(vecino_id)
+                    nuevo_camino = camino + [vecino_id]
+                    stack.append((vecino_id, nuevo_camino, profundidad + 1))
+
+    print(f"❌ No se encontró ruta con límite de profundidad {limite_profundidad}.")
+    return None
+
+
+# ─── MAPA Y ESTADO (UNA SOLA VEZ) ───────────────────────────────────────────
 m = Map(center=(24.805, -107.394), zoom=15)
 m.add_control(FullScreenControl())
 
-# Capa para los marcadores de clic
 capa_interactiva = LayerGroup()
+capa_ruta = LayerGroup()          # ← capa exclusiva para la polilínea
 m.add_layer(capa_interactiva)
+m.add_layer(capa_ruta)
 
-# Variables para guardar los IDs de los nodos para tu algoritmo
 puntos_seleccionados = []
 nodos_id_ruta = {"inicio": None, "meta": None}
+
+# ─── CALLBACKS ───────────────────────────────────────────────────────────────
+def al_presionar_dfs(b):
+    try:
+        if not (nodos_id_ruta["inicio"] and nodos_id_ruta["meta"]):
+            print("⚠️ Selecciona dos puntos en el mapa primero.")
+            return
+
+        inicio = nodos_id_ruta["inicio"]
+        meta   = nodos_id_ruta["meta"]
+
+        if inicio not in grafocompleto:
+            print(f"❌ El nodo de inicio ({inicio}) no está en el grafo.")
+            return
+        if meta not in grafocompleto:
+            print(f"❌ El nodo meta ({meta}) no está en el grafo.")
+            return
+
+        print(f"🔍 Buscando ruta DFS entre {inicio} y {meta}...")
+        camino = buscar_ruta_ldfs(grafocompleto, inicio, meta,30)
+
+        if camino:
+            print(f"✅ Ruta encontrada con {len(camino)} nodos.")
+            print(f"📍 Camino (IDs): {camino}")
+
+            coordenadas_ruta = [
+                [grafocompleto[nid]['lat'], grafocompleto[nid]['lon']]
+                for nid in camino
+                if nid in grafocompleto
+            ]
+            capa_ruta.clear_layers()
+            linea = Polyline(
+                locations=coordenadas_ruta,
+                color="blue",
+                weight=4,
+                opacity=0.8
+            )
+            capa_ruta.add_layer(linea)
+        else:
+            print("❌ No se encontró ruta entre los nodos seleccionados.")
+
+    except Exception as e:
+        print(f"💥 ERROR: {type(e).__name__}: {e}")
+        
+def limpiar(b):
+    puntos_seleccionados.clear()
+    capa_interactiva.clear_layers()
+    capa_ruta.clear_layers()          # ← también limpiar la ruta
+    nodos_id_ruta["inicio"] = None
+    nodos_id_ruta["meta"]   = None
+    print("🧹 Mapa limpio.")
 
 def manejar_clic(**kwargs):
     if kwargs.get('type') == 'click':
         latlon = kwargs.get('coordinates')
-        
         if len(puntos_seleccionados) < 2:
             puntos_seleccionados.append(latlon)
-            
-            # Buscamos el ID del nodo más cercano en tu grafo (usando tu función anterior)
-            # Asegúrate de tener definida 'obtener_id_mas_cercano' y 'nodos_coords'
             nodo_id, _ = obtener_id_mas_cercano(latlon[0], latlon[1], nodos_coords)
-            
-            # Guardamos el ID según sea inicio o meta
-            tipo = "INICIO" if len(puntos_seleccionados) == 1 else "META"
-            if tipo == "INICIO": nodos_id_ruta["inicio"] = nodo_id
-            else: nodos_id_ruta["meta"] = nodo_id
 
-            # Marcador visual
-            color = "green" if tipo == "INICIO" else "red"
+            if len(puntos_seleccionados) == 1:
+                tipo  = "INICIO"
+                nodos_id_ruta["inicio"] = nodo_id
+            else:
+                tipo  = "META"
+                nodos_id_ruta["meta"] = nodo_id
+
             marcador = Marker(location=latlon, draggable=False, title=f"{tipo}: {nodo_id}")
             capa_interactiva.add_layer(marcador)
-            
             print(f"✅ {tipo} capturado. ID Nodo OSM: {nodo_id}")
 
             if len(puntos_seleccionados) == 2:
-                print("\n🚀 LISTO PARA CALCULAR RUTA")
-                print(f"De: {nodos_id_ruta['inicio']} a {nodos_id_ruta['meta']}")
+                print(f"\n🚀 LISTO — Origen: {nodos_id_ruta['inicio']}  |  Destino: {nodos_id_ruta['meta']}")
 
-# Vincular evento
 m.on_interaction(manejar_clic)
 
-# Mostrar el mapa
+# ─── BOTONES ─────────────────────────────────────────────────────────────────
+btn_dfs   = widgets.Button(description="Ejecutar DFS",  button_style='primary')
+btn_reset = widgets.Button(description="Limpiar",        button_style='danger')
+btn_dfs.on_click(al_presionar_dfs)
+btn_reset.on_click(limpiar)
+
 display(m)
-
-
-def crear_mapa_con_marcadores():
-    centro = [24.796998, -107.387524]
-    mapa = folium.Map(location=centro, zoom_start=15)
-    
-    # Solo cargamos el JS externo
-    mapa.get_root().header.add_child(JavascriptLink("./script.js"))
-    
-    mapa.save("marcador_permanente.html")
-    print("Mapa generado. El JS buscará el mapa automáticamente.")
-crear_mapa_con_marcadores()
-
-def llamar_openstreetmap(lat1, lon1, lat2, lon2):
-    # 1. Configurar la URL (Formato: longitud,latitud)
-    # Perfil 'driving' para rutas en auto
-    url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}"
-    
-    # 2. Parámetros para obtener todos los puntos del camino
-    params = {
-        'overview': 'full',    # Traer la ruta completa
-        'geometries': 'geojson', # Formato fácil de leer en Python
-        'steps': 'true'        # Traer las instrucciones paso a paso
-    }
-
-    try:
-        print(f"Llamando a OpenStreetMap...")
-        r = requests.get(url, params=params)
-        
-        if r.status_code == 200:
-            data = r.json()
-            
-            # Extraer la ruta principal
-            ruta = data['routes'][0]
-            
-            # ESTO ES LO QUE NECESITAS PARA TU TALLER:
-            # Una lista de todas las coordenadas que forman el camino
-            nodos = ruta['geometry']['coordinates']
-            
-            print(f"\n--- Datos obtenidos ---")
-            print(f"Distancia total: {ruta['distance'] / 1000:.2f} km")
-            print(f"Número de nodos encontrados: {len(nodos)}")
-            
-            print("\nPrimeros 5 nodos (puntos de intersección):")
-            for i, punto in enumerate(nodos[:5]):
-                # OSRM devuelve [longitud, latitud]
-                print(f" Nodo {i}: Lat {punto[1]}, Lon {punto[0]}")
-                
-            return nodos
-        else:
-            print(f"Error en la llamada: {r.status_code}")
-            return None
-
-    except Exception as e:
-        print(f"Error de conexión: {e}")
-        return None
+display(widgets.HBox([btn_dfs, btn_reset]))
 # %%
