@@ -147,7 +147,51 @@ def buscar_ruta_dfs(grafo, inicio_id, meta_id):
 
     print("No se encontró una ruta entre los nodos seleccionados.")
     return None
+def buscar_ruta_voraz(grafo, inicio_id, meta_id):
 
+    # Heurística: distancia Manhattan entre coordenadas reales (Haversine)
+    def heuristica(nodo_id):
+        lat_actual = grafo[nodo_id]['lat']
+        lon_actual = grafo[nodo_id]['lon']
+        lat_meta   = grafo[meta_id]['lat']
+        lon_meta   = grafo[meta_id]['lon']
+        return calcular_distancia((lat_actual, lon_actual), (lat_meta, lon_meta))
+
+    # 1. Pila: guarda (nodo_actual, camino_recorrido)
+    stack = [(inicio_id, [inicio_id])]
+
+    # 2. Conjunto de visitados para evitar ciclos
+    visitados = {inicio_id}
+
+    while stack:
+        nodo_actual, camino = stack.pop()
+
+        # ¿Llegamos a la meta?
+        if nodo_actual == meta_id:
+            print(f"✅ Voraz éxito — nodos recorridos: {len(camino)}")
+            return camino
+
+        # Explorar vecinos y calcular heurística para cada uno
+        if 'vecinos' in grafo[nodo_actual]:
+            candidatos = []
+
+            for vecino_info in grafo[nodo_actual]['vecinos']:
+                vecino_id = vecino_info['id']
+
+                if vecino_id in grafo and vecino_id not in visitados:
+                    visitados.add(vecino_id)
+                    h = heuristica(vecino_id)
+                    candidatos.append((vecino_id, camino + [vecino_id], h))
+
+            # 🔑 DIFERENCIA CLAVE: ordenar por heurística DESCENDENTE
+            # porque usamos stack.pop() que saca el ÚLTIMO (el mejor queda al final)
+            candidatos.sort(key=lambda x: x[2], reverse=True)
+
+            for vecino_id, nuevo_camino, _ in candidatos:
+                stack.append((vecino_id, nuevo_camino))
+
+    print("❌ No se encontró ruta.")
+    return None
 
 inicio=1524944651
 meta= 1441797142
