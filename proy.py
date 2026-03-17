@@ -1,4 +1,12 @@
 #%%
+# importamos las librerias necesarias para el proyecto
+# requests: para hacer peticiones a la api de openstreetmap
+# math: para calculos matematicos como seno coseno y raiz cuadrada
+# ipyleaflet: para mostrar el mapa interactivo en jupyter
+# ipywidgets: para crear los botones y el panel de salida
+# heapq: para la cola de prioridad que usa a estrella
+# deque: para la cola de bfs y la lista tabu
+# random: para el numero aleatorio que usa recocido simulado
 import requests
 import math
 from ipyleaflet import Map, Marker, FullScreenControl, LayerGroup, Polyline
@@ -8,13 +16,19 @@ import heapq
 from collections import deque  
 import random
 
-# coordenadas del sector de culiacan que vamos a usar
+# definimos el area geografica que vamos a trabajar
+# son las coordenadas de un sector de culiacan sinaloa
+# sur y norte definen el rango de latitud
+# oeste y este definen el rango de longitud
 sur = 24.796998
 oeste = -107.401461
 norte = 24.812974
 este = -107.387524
 
-# hace la peticion a overpass api y regresa los elementos del sector
+# esta funcion se conecta a overpass api que es el servicio de openstreetmap
+# le mandamos las coordenadas del sector y nos regresa todos los nodos y calles
+# que hay dentro de esa area geografica
+# solo pedimos calles primarias secundarias terciarias y residenciales
 def extraer_nodos_sector(south, west, north, east):
     url = "https://overpass-api.de/api/interpreter"
     query = f"""
@@ -27,27 +41,42 @@ def extraer_nodos_sector(south, west, north, east):
         return r.json().get('elements', [])
     return []
 
+# llamamos a la funcion para obtener los datos del sector
 data = extraer_nodos_sector(sur, oeste, norte, este)
 
-# diccionario con id del nodo como llave y sus coordenadas como valor
+# de todos los datos que regreso la api separamos solo los nodos
+# un nodo es un punto geografico con latitud y longitud
+# guardamos cada nodo en un diccionario usando su id como llave
+# ejemplo: {123456: (24.80, -107.39), 789012: (24.81, -107.40)}
 nodos_coords = {}
 for e in data:
     if e['type'] == 'node':
         nodos_coords[e['id']] = (e['lat'], e['lon'])
 
-# formula de haversine para calcular distancia real en metros entre dos coordenadas
+# esta funcion calcula la distancia real en metros entre dos puntos geograficos
+# usamos la formula de haversine porque la tierra es redonda
+# si usaramos una formula normal de distancia euclidiana el resultado seria incorrecto
+# porque las coordenadas geograficas no forman una cuadricula plana
+# p1 y p2 son tuplas con (latitud longitud)
 def calcular_distancia(p1, p2):
     lat1, lon1 = p1
     lat2, lon2 = p2
+    # radio de la tierra en metros
     radio_tierra = 6371000
+    # convertimos los grados a radianes porque math.sin y math.cos usan radianes
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
     delta_lambda = math.radians(lon2 - lon1)
+    # formula de haversine
     a = math.sin(delta_phi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    # multiplicamos por el radio para obtener metros
     return radio_tierra * c
 
-# recorre todos los nodos y regresa el id del mas cercano 
+# cuando el usuario da clic en el mapa necesitamos saber a que nodo del grafo
+# corresponde ese clic porque el clic puede caer en medio de la calle
+# esta funcion recorre todos los nodos y regresa el id del que esta mas cerca
+# del punto donde dio clic el usuario
 def obtener_id_mas_cercano(lat_clic, lon_clic, nodos_dict):
     distancia_minima = float('inf')
     id_mas_cercano = None
@@ -58,8 +87,15 @@ def obtener_id_mas_cercano(lat_clic, lon_clic, nodos_dict):
             id_mas_cercano = nodo_id
     return id_mas_cercano, distancia_minima
 
-# construye el grafo con nodos y aristas a partir de los nodos 
-# cada nodo tiene lat lon y lista de vecinos con su distancia
+# esta funcion convierte los datos crudos de openstreetmap en un grafo
+# un grafo es una estructura de datos donde cada nodo tiene una lista de vecinos
+# cada vecino tiene un id y un peso que es la distancia en metros hasta ese vecino
+# el grafo se ve asi:
+# {
+#   123456: {lat: 24.80, lon: -107.39, vecinos: [{id: 789012, peso: 45.3}, ...]},
+#   789012: {lat: 24.81, lon: -107.40, vecinos: [{id: 123456, peso: 45.3}, ...]},
+# }
+# las calles son bidireccionales por eso cada conexion se agrega en ambos sentidos
 def construir_grafo(data):
     grafo = {}
     nodos_c = {e['id']: (e['lat'], e['lon']) for e in data if e['type'] == 'node'}
@@ -76,14 +112,19 @@ def construir_grafo(data):
                         grafo[u] = {'lat': nodos_c[u][0], 'lon': nodos_c[u][1], 'vecinos': []}
                     if v not in grafo:
                         grafo[v] = {'lat': nodos_c[v][0], 'lon': nodos_c[v][1], 'vecinos': []}
-                    # conexion en ambas direcciones
+                    # conexion en ambas direcciones porque las calles son bidireccionales
                     grafo[u]['vecinos'].append({'id': v, 'peso': dist})
                     grafo[v]['vecinos'].append({'id': u, 'peso': dist})
     return grafo
 
+# construimos el grafo con todos los datos que descargamos
 grafocompleto = construir_grafo(data)
 
-# distancia en metros entre un nodo y la meta usada como heuristica
+# la heuristica es una estimacion de que tan lejos estamos de la meta
+# la usan los algoritmos informados (voraz a estrella tabu recocido) para
+# decidir hacia que nodo moverse primero
+# usamos la distancia en linea recta entre el nodo actual y la meta
+# es una heuristica admisible porque nunca sobreestima la distancia real
 def heuristica(grafo, nodo_id, meta_id):
     lat_actual = grafo[nodo_id]['lat']
     lon_actual = grafo[nodo_id]['lon']
@@ -91,12 +132,18 @@ def heuristica(grafo, nodo_id, meta_id):
     lon_meta   = grafo[meta_id]['lon']
     return calcular_distancia((lat_actual, lon_actual), (lat_meta, lon_meta))
 
-# busqueda por amplitud - explora nivel por nivel garantiza el camino con menos nodos
+# algoritmo bfs (busqueda por amplitud)
+# explora todos los nodos nivel por nivel usando una cola (fifo)
+# garantiza encontrar el camino con menos nodos intermedios
+# no garantiza el camino mas corto en metros
+# visitados evita que el algoritmo entre en ciclos infinitos
 def buscar_ruta_bfs(grafo, inicio_id, meta_id):
+    # la cola guarda tuplas de (nodo actual, camino recorrido hasta ese nodo)
     cola = deque([(inicio_id, [inicio_id])])
     visitados = {inicio_id}
     paso = 0
     while cola:
+        # popleft saca el primer elemento de la cola (el mas antiguo)
         nodo_actual, camino = cola.popleft()
         paso = paso + 1
         print("paso " + str(paso) + " - visitando nodo " + str(nodo_actual) + " | nodos en camino: " + str(len(camino)))
@@ -114,12 +161,17 @@ def buscar_ruta_bfs(grafo, inicio_id, meta_id):
     print("BFS: No se encontro ruta.")
     return None
 
-# busqueda por profundidad - usa pila en vez de cola por eso va mas profundo antes de explorar
+# algoritmo dfs (busqueda por profundidad)
+# explora tan profundo como puede antes de retroceder usando una pila (lifo)
+# no garantiza el camino con menos nodos ni el mas corto en metros
+# puede encontrar una solucion rapido si tiene suerte con la direccion
 def buscar_ruta_dfs(grafo, inicio_id, meta_id):
+    # la pila guarda tuplas de (nodo actual, camino recorrido, profundidad actual)
     stack = [(inicio_id, [inicio_id], 0)]
     visitados = {inicio_id}
     paso = 0
     while stack:
+        # pop saca el ultimo elemento de la pila (el mas reciente)
         nodo_actual, camino, profundidad = stack.pop()
         paso = paso + 1
         print("paso " + str(paso) + " - visitando nodo " + str(nodo_actual) + " | profundidad: " + str(profundidad) + " | nodos en camino: " + str(len(camino)))
@@ -138,7 +190,10 @@ def buscar_ruta_dfs(grafo, inicio_id, meta_id):
     print("DFS: No se encontro ruta.")
     return None
 
-# dfs con limite de profundidad - igual que dfs pero para de explorar si llega al limite
+# algoritmo ldfs (dfs con limite de profundidad)
+# igual que dfs pero deja de explorar una rama cuando llega al limite
+# esto evita que el algoritmo se vaya demasiado lejos en una direccion equivocada
+# si el limite es muy bajo puede no encontrar la ruta aunque exista
 def buscar_ruta_ldfs(grafo, inicio_id, meta_id, limite_profundidad=50):
     stack = [(inicio_id, [inicio_id], 0)]
     visitados = {inicio_id}
@@ -151,7 +206,7 @@ def buscar_ruta_ldfs(grafo, inicio_id, meta_id, limite_profundidad=50):
         if nodo_actual == meta_id:
             print("LDFS exito, nodos: " + str(len(camino)) + ", profundidad: " + str(profundidad))
             return camino
-        # si llego al limite no expande este nodo
+        # si llego al limite no expande este nodo y pasa al siguiente en la pila
         if profundidad >= limite_profundidad:
             print("paso " + str(paso) + " - limite alcanzado en nodo " + str(nodo_actual) + " no se expande")
             continue
@@ -165,7 +220,11 @@ def buscar_ruta_ldfs(grafo, inicio_id, meta_id, limite_profundidad=50):
     print("LDFS: No se encontro ruta con limite " + str(limite_profundidad))
     return None
 
-# busqueda voraz - siempre elige el vecino mas cercano a la meta segun la heuristica
+# algoritmo voraz (greedy best first search)
+# es un algoritmo informado que usa la heuristica para decidir a donde ir
+# siempre elige el vecino que parece estar mas cerca de la meta
+# es rapido pero no garantiza la ruta optima porque puede tomar atajos equivocados
+# la diferencia con bfs y dfs es que usa la heuristica para ordenar los candidatos
 def buscar_ruta_voraz(grafo, inicio_id, meta_id):
     stack = [(inicio_id, [inicio_id])]
     visitados = {inicio_id}
@@ -188,20 +247,29 @@ def buscar_ruta_voraz(grafo, inicio_id, meta_id):
                     h = heuristica(grafo, vecino_id, meta_id)
                     candidatos.append((vecino_id, camino + [vecino_id], h))
             # ordena descendente porque stack.pop() saca el ultimo
-            # entonces el mejor queda hasta el final de la lista
+            # entonces el mejor (menor h) queda hasta el final de la lista
             candidatos.sort(key=lambda x: x[2], reverse=True)
             for vecino_id, nuevo_camino, h in candidatos:
                 stack.append((vecino_id, nuevo_camino))
     print("Voraz: No se encontro ruta.")
     return None
 
-# a estrella - combina costo real del camino con la heuristica para encontrar la ruta optima
+# algoritmo a estrella (a*)
+# es el algoritmo mas completo de todos los que implementamos
+# combina el costo real del camino recorrido (g) con la heuristica (h)
+# f = g + h donde f es el valor total que determina que nodo explorar primero
+# a diferencia del voraz que solo usa h este tambien considera el costo real
+# garantiza encontrar la ruta mas corta en metros si la heuristica es admisible
+# usa un heap (cola de prioridad) para siempre sacar el nodo con menor f
 def buscar_ruta_a_star(grafo, inicio_id, meta_id):
-    # f = g + h donde g es distancia recorrida y h es distancia estimada a la meta
+    # el open set guarda tuplas de (f score, g score, nodo actual, camino)
+    # f = g + h  donde g es la distancia recorrida y h es la distancia estimada
     open_set = [(heuristica(grafo, inicio_id, meta_id), 0, inicio_id, [inicio_id])]
+    # mejor_g guarda la menor distancia conocida para llegar a cada nodo
     mejor_g = {inicio_id: 0}
     nodos_explorados = 0
     while open_set:
+        # heappop saca el nodo con menor f score (el mas prometedor)
         f_score, g_score, nodo_actual, camino = heapq.heappop(open_set)
         nodos_explorados = nodos_explorados + 1
         print("paso " + str(nodos_explorados) + " - visitando nodo " + str(nodo_actual) + " | g: " + str(round(g_score, 1)) + "m | f: " + str(round(f_score, 1)) + "m")
@@ -209,7 +277,8 @@ def buscar_ruta_a_star(grafo, inicio_id, meta_id):
         if nodo_actual == meta_id:
             print("A* exito, nodos: " + str(len(camino)) + ", explorados: " + str(nodos_explorados) + ", distancia: " + str(round(g_score, 1)) + "m")
             return camino
-        # si ya encontramos un camino mejor a este nodo lo ignoramos
+        # puede pasar que un nodo entre al heap varias veces con diferentes g scores
+        # si ya procesamos este nodo con un g score menor lo ignoramos
         if g_score > mejor_g.get(nodo_actual, float('inf')):
             print("  nodo " + str(nodo_actual) + " ignorado porque ya existe un camino mejor")
             continue
@@ -220,7 +289,7 @@ def buscar_ruta_a_star(grafo, inicio_id, meta_id):
                 if vecino_id not in grafo:
                     continue
                 nuevo_g = g_score + peso
-                # solo agrega al open set si encontramos un camino mas corto
+                # solo agrega al open set si encontramos un camino mas corto a este vecino
                 if nuevo_g < mejor_g.get(vecino_id, float('inf')):
                     mejor_g[vecino_id] = nuevo_g
                     nuevo_f = nuevo_g + heuristica(grafo, vecino_id, meta_id)
@@ -230,12 +299,19 @@ def buscar_ruta_a_star(grafo, inicio_id, meta_id):
     print("A*: No se encontro ruta. Explorados: " + str(nodos_explorados))
     return None
 
-# busqueda tabu - como voraz pero recuerda los ultimos nodos visitados para no repetirlos
+# algoritmo de busqueda tabu
+# es una metaheuristica que mejora al voraz agregando memoria
+# la lista tabu guarda los ultimos nodos visitados para evitar revisitarlos
+# esto le permite escapar de ciclos aunque no garantiza la solucion optima
+# tabu_size controla cuantos nodos recuerda si es muy grande puede atascarse
+# si es muy pequeno puede volver a visitar nodos recientes
 def buscar_ruta_tabu(grafo, inicio_id, meta_id, tabu_size=20, max_iteraciones=10000):
     current = inicio_id
     camino = [inicio_id]
-    tabu_list = deque()  # guarda el orden de entrada para saber cual es el mas antiguo
-    tabu_set = set()     # set para buscar rapido si un nodo esta en la lista tabu
+    # usamos deque para poder eliminar el elemento mas antiguo facilmente con popleft
+    tabu_list = deque()
+    # usamos set para verificar rapido si un nodo esta en tabu (O(1) vs O(n) de lista)
+    tabu_set = set()
     iteraciones = 0
     while current != meta_id:
         if iteraciones >= max_iteraciones:
@@ -256,15 +332,15 @@ def buscar_ruta_tabu(grafo, inicio_id, meta_id, tabu_size=20, max_iteraciones=10
         if not candidatos:
             print("Tabu: Sin movimientos disponibles en iteracion " + str(iteraciones))
             return None
-        # elige el mejor candidato segun la heuristica
+        # elige el mejor candidato segun la heuristica igual que el voraz
         candidatos.sort(key=lambda x: x[1])
         siguiente_id = candidatos[0][0]
         print("  moviendose a nodo " + str(siguiente_id) + " | candidatos disponibles: " + str(len(candidatos)))
 
-        # agrega el nodo actual a tabu antes de moverse
+        # agrega el nodo actual a tabu antes de moverse al siguiente
         tabu_list.append(current)
         tabu_set.add(current)
-        # elimina el nodo mas antiguo si se paso del limite
+        # si la lista supera el limite elimina el nodo mas antiguo
         if len(tabu_list) > tabu_size:
             nodo_viejo = tabu_list.popleft()
             tabu_set.discard(nodo_viejo)
@@ -274,8 +350,16 @@ def buscar_ruta_tabu(grafo, inicio_id, meta_id, tabu_size=20, max_iteraciones=10
     print("Tabu exito, nodos: " + str(len(camino)) + ", iteraciones: " + str(iteraciones))
     return camino
 
-# recocido simulado - como voraz pero acepta movimientos malos con cierta probabilidad
-# la probabilidad de aceptar un mal movimiento baja conforme la temperatura disminuye
+# algoritmo de recocido simulado (simulated annealing)
+# es una metaheuristica inspirada en el proceso de enfriamiento de metales
+# al igual que tabu mejora al voraz pero de manera diferente
+# en vez de usar memoria acepta movimientos malos con cierta probabilidad
+# al inicio con temperatura alta acepta casi cualquier movimiento (explora mucho)
+# conforme la temperatura baja se vuelve mas selectivo (explora menos)
+# esto le permite escapar de minimos locales que atraparian a un voraz normal
+# delta es la diferencia entre la heuristica del siguiente nodo y la del actual
+# si delta es negativo el movimiento mejora y siempre se acepta
+# si delta es positivo el movimiento empeora y se acepta con probabilidad e^(-delta/temp)
 def buscar_ruta_recocido(grafo, inicio_id, meta_id, temp_inicial=1000, tasa_enfriamiento=0.995, max_iteraciones=10000):
     current = inicio_id
     camino = [inicio_id]
@@ -311,7 +395,7 @@ def buscar_ruta_recocido(grafo, inicio_id, meta_id, temp_inicial=1000, tasa_enfr
             camino.append(current)
         else:
             print("  movimiento rechazado hacia nodo " + str(siguiente_id) + " | delta: " + str(round(delta, 1)))
-        # enfria la temperatura en cada iteracion
+        # multiplicamos la temperatura por la tasa de enfriamiento en cada iteracion
         temp = temp * tasa_enfriamiento
     if current == meta_id:
         print("Recocido exito, nodos: " + str(len(camino)) + ", iteraciones: " + str(iteraciones))
@@ -319,22 +403,29 @@ def buscar_ruta_recocido(grafo, inicio_id, meta_id, temp_inicial=1000, tasa_enfr
     print("Recocido: Temperatura agotada, no se llego a la meta.")
     return None
 
-# mapa centrado en el sector
+# creamos el mapa centrado en el sector de culiacan
 m = Map(center=(24.805, -107.394), zoom=15)
 m.add_control(FullScreenControl())
 
+# capa_interactiva: guarda los marcadores de inicio y meta que pone el usuario
+# capa_ruta: guarda la linea azul del camino encontrado
+# las capas nos permiten limpiar solo lo que necesitamos sin borrar todo el mapa
 capa_interactiva = LayerGroup()
 capa_ruta = LayerGroup()
 m.add_layer(capa_interactiva)
 m.add_layer(capa_ruta)
 
-# guarda los puntos que el usuario va seleccionando
+# puntos_seleccionados: lista con las coordenadas de los clics del usuario
+# nodos_id_ruta: diccionario con los ids de los nodos de inicio y meta
+# out: widget donde se muestran todos los prints de los algoritmos
+# ejecutando: bandera para evitar que el usuario ejecute dos algoritmos al mismo tiempo
 puntos_seleccionados = []
 nodos_id_ruta = {"inicio": None, "meta": None}
 out = widgets.Output()
 ejecutando = False
 
-# dibuja el camino en el mapa como una linea azul
+# recibe el camino como lista de ids de nodos
+# convierte esos ids a coordenadas y dibuja una linea en el mapa
 def dibujar_ruta(camino):
     if camino != None:
         print("Camino (IDs): " + str(camino))
@@ -350,7 +441,9 @@ def dibujar_ruta(camino):
     else:
         print("No se encontro ruta.")
 
-# verifica que el usuario haya seleccionado dos puntos validos antes de buscar
+# antes de ejecutar cualquier algoritmo verificamos que el usuario
+# haya seleccionado los dos puntos y que ambos existan en el grafo
+# si algo falla regresa None None y el callback cancela la ejecucion
 def validar_puntos():
     if nodos_id_ruta["inicio"] == None or nodos_id_ruta["meta"] == None:
         print("Selecciona dos puntos en el mapa primero.")
@@ -366,6 +459,7 @@ def validar_puntos():
     return inicio, meta
 
 # ejecuta bfs cuando el usuario presiona el boton
+# ejecutando evita que se ejecuten dos algoritmos al mismo tiempo
 def on_bfs(b):
     global ejecutando
     if ejecutando == True:
@@ -498,7 +592,8 @@ def on_recocido(b):
             print("ERROR: " + str(e))
         ejecutando = False
 
-# limpia el mapa y reinicia los puntos seleccionados
+# limpia el mapa y reinicia todas las variables de estado
+# borra los marcadores de inicio y meta y la linea de la ruta
 def limpiar(b):
     puntos_seleccionados.clear()
     capa_interactiva.clear_layers()
@@ -509,7 +604,10 @@ def limpiar(b):
     with out:
         print("Mapa limpio.")
 
-# captura el clic del usuario en el mapa y guarda el nodo mas cercano
+# esta funcion se ejecuta cada vez que el usuario da clic en el mapa
+# el primer clic define el nodo de inicio y el segundo define la meta
+# busca el nodo del grafo mas cercano al punto donde dio clic
+# y pone un marcador en el mapa para que el usuario vea donde quedo
 def manejar_clic(**kwargs):
     if kwargs.get('type') == 'click':
         latlon = kwargs.get('coordinates')
@@ -533,7 +631,7 @@ m.on_interaction(manejar_clic, remove=True)
 m.on_interaction(manejar_clic)
 
 # %%
-# botones
+# celda 2 - se puede re-ejecutar sin problemas porque solo crea botones nuevos
 out.clear_output()
 
 btn_bfs      = widgets.Button(description="BFS",      button_style='primary')
